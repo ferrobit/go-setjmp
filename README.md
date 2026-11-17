@@ -1,14 +1,78 @@
 # setjmp — setjmp/longjmp for Go (amd64, arm64)
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/ferrobit/go-setjmp.svg)](https://pkg.go.dev/github.com/ferrobit/go-setjmp)
+
+## Installation
+```sh
+go get github.com/ferrobit/go-setjmp
+```
+The import path is `github.com/ferrobit/go-setjmp`, the package name is `setjmp`.
+
+## Example
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/ferrobit/go-setjmp"
+)
+
+type retryLoop struct {
+	buf    setjmp.JMPBuf
+	passes int
+}
+
+func main() {
+	loop := &retryLoop{}
+	defer loop.buf.Free()
+	if loop.buf.Set() {
+		if err := loop.buf.Err(); err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println("set")
+	} else {
+		fmt.Println("jumped")
+	}
+	if loop.passes++; loop.passes < 3 {
+		if err := loop.buf.Jump(); err != nil {
+			fmt.Println(err)
+		}
+	}
+	fmt.Println("passes:", loop.passes)
+}
+```
+Output:
+```
+set
+jumped
+jumped
+passes: 3
+```
+`loop` lives on the heap, so `passes` survives the jumps. More examples — a non-local exit from
+recursion, a generator that resumes finished frames, error handling — are in
+[example_test.go](example_test.go) and on [pkg.go.dev](https://pkg.go.dev/github.com/ferrobit/go-setjmp#pkg-examples).
+
+## API
+| Method | Description |
+|---|---|
+| `Set() bool` | Saves the stack. Returns `true` when called directly (also on failure, see `Err`) and `false` when resumed by `Jump`. |
+| `Jump() error` | Resumes the last `Set` of the buffer. Returns only on failure. |
+| `Err() error` | Reports why the last `Set` failed, or `nil`. |
+| `Free()` | Releases the saved stack. Safe on an unset buffer. |
+| `Debug bool` | Runs a full garbage collection inside `Set` and `Jump`. |
+
 ## Contents
 - `jmpbuf.go` — the `setjmp` package: the `JMPBuf` type (`Set`, `Jump`, `Free`, `Err`).
 - `jmpbuf_amd64.s`, `jmpbuf_amd64.go`, `jmpbuf_arm64.s`, `jmpbuf_arm64.go` — CPU-specific parts.
 - `jmpbuf_test.go` — tests (19 of them) and a benchmark.
+- `example_test.go` — usage examples (6 of them), checked by `go test`.
 - `library/main.go` — a shared library (`-buildmode=c-shared`) that exports
   `Exported`, `Next`, `Checksum`, `Reference`, `Collect`.
 - `application/main.c` — a C application that calls the library from several threads.
 
-## Usage
+## Building and testing
 The build file is named `build.mk`; it can be renamed to `Makefile`.
 - `make -f build.mk test` — `go vet` and tests with coverage.
 - `make -f build.mk run` — builds the library and the application and runs them (normally and
@@ -47,7 +111,8 @@ shifted. This is done once per snapshot and only when the location has changed.
 ## Semantics
 - Stack variables revert after `Jump` to their values at the time of `Set`. This also applies to
   `new(T)` and `&T{}` that the compiler kept on the stack. Keep everything that must survive
-  the jump on the heap or in global variables.
+  the jump on the heap or in global variables. A value whose address reaches `Set` or `Jump`
+  (for example, a struct that contains the `JMPBuf`) always lives on the heap.
 - Heap data is not rolled back.
 - Deferred calls (`defer`) of abandoned frames are not run — as in C. In restored frames they
   run when the function returns.
@@ -66,3 +131,6 @@ shifted. This is done once per snapshot and only when the location has changed.
 - The package reads runtime internals (`runtime.g`, `runtime.m`, `runtime._defer`,
   `runtime.writeBarrier`, `runtime.findfunc`, the frame size table). The layout is checked on the
   first `Set`; on a mismatch `Set` returns `true` and `Err` reports the reason.
+
+## License
+[MIT](LICENSE).

@@ -10,7 +10,7 @@ import (
 	"os"
 	"runtime"
 
-	"mql5/setjmp"
+	"github.com/ferrobit/go-setjmp"
 )
 
 type chainNode struct {

@@ -1,4 +1,4 @@
-module mql5/setjmp
+module github.com/ferrobit/go-setjmp
 
 go 1.23
 
