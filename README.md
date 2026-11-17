@@ -1,66 +1,68 @@
-# setjmp — аналог setjmp/longjmp для Go (amd64, arm64)
+# setjmp — setjmp/longjmp for Go (amd64, arm64)
 
-## Состав
-- `jmpbuf.go` — пакет `setjmp`: тип `JMPBuf` (`Set`, `Jump`, `Free`, `Err`).
-- `jmpbuf_amd64.s`, `jmpbuf_amd64.go`, `jmpbuf_arm64.s`, `jmpbuf_arm64.go` — части под процессор.
-- `jmpbuf_test.go` — тесты (19 штук) и замер скорости.
-- `library/main.go` — разделяемая библиотека (`-buildmode=c-shared`) с экспортом
+## Contents
+- `jmpbuf.go` — the `setjmp` package: the `JMPBuf` type (`Set`, `Jump`, `Free`, `Err`).
+- `jmpbuf_amd64.s`, `jmpbuf_amd64.go`, `jmpbuf_arm64.s`, `jmpbuf_arm64.go` — CPU-specific parts.
+- `jmpbuf_test.go` — tests (19 of them) and a benchmark.
+- `library/main.go` — a shared library (`-buildmode=c-shared`) that exports
   `Exported`, `Next`, `Checksum`, `Reference`, `Collect`.
-- `application/main.c` — приложение на C: вызывает библиотеку из нескольких потоков.
+- `application/main.c` — a C application that calls the library from several threads.
 
-## Запуск
-Файл сборки назван `build.mk`; его можно переименовать в `Makefile`.
-- `make -f build.mk test` — `go vet` и тесты с покрытием.
-- `make -f build.mk run` — сборка библиотеки и приложения, прогон (обычный и под нагрузкой
-  на сборщик мусора).
-- `make -f build.mk stress` — тесты с `GOGC=1`, `gccheckmark=1`, `clobberfree=1`.
-- `make -f build.mk test-arm64` и `run-arm64` — то же для arm64 через эмулятор
-  `qemu-aarch64-static` и кросс-компилятор `aarch64-linux-gnu-gcc`.
+## Usage
+The build file is named `build.mk`; it can be renamed to `Makefile`.
+- `make -f build.mk test` — `go vet` and tests with coverage.
+- `make -f build.mk run` — builds the library and the application and runs them (normally and
+  under garbage collector pressure).
+- `make -f build.mk stress` — tests with `GOGC=1`, `gccheckmark=1`, `clobberfree=1`.
+- `make -f build.mk test-arm64` and `run-arm64` — the same for arm64 via the
+  `qemu-aarch64-static` emulator and the `aarch64-linux-gnu-gcc` cross compiler.
 
-## Как работает
-1. `Set` находит «базу» — первый кадр, вызванный из рантайма (`runtime.*`) или из обёртки cgo
-   (`_cgoexp_*`). Захватывается всё от места вызова `Set` до базы.
-2. Кадры копируются в буфер без указателей. Копию получает горутина-«держатель»: она
-   раскладывает кадры на своём стеке и засыпает под ними.
-3. Сборщик мусора видит у держателя настоящие кадры с настоящими картами указателей. Поэтому всё,
-   на что ссылается снимок, живо, а сам рантайм двигает и сканирует этот стек штатно.
-4. `Jump` копирует снимок обратно — под базу текущей горутины — и возвращается из `Set` с `false`.
-5. `Free` (или повторный `Set`) отпускает держателя.
+## How it works
+1. `Set` finds the "base": the first frame called from the runtime (`runtime.*`) or from a cgo
+   wrapper (`_cgoexp_*`). Everything from the `Set` call site up to the base is captured.
+2. The frames are copied into a pointer-free buffer. The copy is handed to a "holder" goroutine:
+   it lays the frames out on its own stack and sleeps beneath them.
+3. The garbage collector sees real frames with real pointer maps on the holder. So everything
+   the snapshot refers to stays alive, and the runtime itself moves and scans this stack as usual.
+4. `Jump` copies the snapshot back — below the base of the current goroutine — and returns from
+   `Set` with `false`.
+5. `Free` (or another `Set`) releases the holder.
 
-## Скорость
-- Держатель — сопрограмма (`iter.Pull`). Управление передаётся ей напрямую, без планировщика
-  и без усыпления вызывающего потока. Это главное для вызовов из C: там горутина привязана
-  к потоку, и обычное ожидание на канале стоит порядка 10 мкс.
-- Повторный `Set` на том же буфере переиспользует своего держателя. Освобождённые держатели
-  лежат в запасе — отдельно для каждого потока с привязкой.
-- Запасной путь — держатели на каналах. Он включается сам, если пакет не нашёл в рантайме
-  счётчики привязки к потоку.
+## Performance
+- The holder is a coroutine (`iter.Pull`). Control is transferred to it directly, without the
+  scheduler and without putting the calling thread to sleep. This matters most for calls from C:
+  there the goroutine is locked to its thread, and a plain wait on a channel costs about 10 µs.
+- A repeated `Set` on the same buffer reuses its holder. Released holders are kept in a pool,
+  separately for each locked thread.
+- The fallback is channel-based holders. It is enabled automatically if the package does not
+  find the thread-locking counters in the runtime.
 
-## Адреса при переезде стека
-Если снимок возвращается на другое место (стек вырос, другая горутина, другой поток), адреса
-внутри него надо сдвинуть. Какие слова — адреса, решает сам рантайм: пакет раскладывает
-временную копию снимка на отдельной горутине, заставляет её стек переехать и сравнивает
-«до» и «после». Сдвигаются только те слова, которые сдвинул рантайм. Делается один раз
-на снимок и только когда место изменилось.
+## Addresses when the stack moves
+If a snapshot is restored to a different place (the stack grew, another goroutine, another
+thread), the addresses inside it must be shifted. The runtime itself decides which words are
+addresses: the package lays out a scratch copy of the snapshot on a separate goroutine, forces
+its stack to move, and compares "before" and "after". Only the words the runtime shifted are
+shifted. This is done once per snapshot and only when the location has changed.
 
-## Семантика
-- Переменные на стеке после `Jump` возвращаются к значениям на момент `Set`. Это касается и
-  `new(T)`, `&T{}`, которые компилятор оставил на стеке. Всё, что должно пережить прыжок,
-  держите в куче или в глобальных переменных.
-- Данные в куче не откатываются.
-- Отложенные вызовы (`defer`) брошенных кадров не выполняются — как в C. В восстановленных
-  кадрах они выполнятся при выходе из функции.
-- Прыгать можно вверх, вниз (в уже завершённые кадры), много раз в один буфер, из другого
-  вызова экспортируемой функции и с другого потока или горутины.
-- `Jump` возвращает управление только при ошибке. Причину неудачного `Set` отдаёт `Err`.
+## Semantics
+- Stack variables revert after `Jump` to their values at the time of `Set`. This also applies to
+  `new(T)` and `&T{}` that the compiler kept on the stack. Keep everything that must survive
+  the jump on the heap or in global variables.
+- Heap data is not rolled back.
+- Deferred calls (`defer`) of abandoned frames are not run — as in C. In restored frames they
+  run when the function returns.
+- You can jump up, down (into frames that have already returned), many times into one buffer,
+  from another call of an exported function, and from another thread or goroutine.
+- `Jump` returns only on error. `Err` reports why `Set` failed.
 
-## Ограничения
-- amd64 и arm64, Linux, Go 1.23–1.27. arm64 проверен только в эмуляторе.
-- `defer` внутри цикла в захватываемых кадрах — `Set` откажет (ошибка в `Err`).
-- Нельзя прыгать сквозь кадры рантайма: `reflect.Value.Call`, обработку `panic`.
-- `JMPBuf` не потокобезопасен. Один буфер — один владелец в каждый момент.
-- Пока буфер не освобождён, живёт его держатель. Вызывайте `Free`.
-- Указатели из захваченных кадров в кадр базы (выше снимка) при переезде не сдвигаются.
-- Пакет читает внутренности рантайма (`runtime.g`, `runtime.m`, `runtime._defer`,
-  `runtime.writeBarrier`, `runtime.findfunc`, таблицу размеров кадров). Раскладка проверяется
-  при первом `Set`; при несовпадении `Set` вернёт `true`, а `Err` — причину.
+## Limitations
+- amd64 and arm64, Linux, Go 1.23–1.27. arm64 is tested only in the emulator.
+- `defer` inside a loop in captured frames — `Set` refuses (the error is in `Err`).
+- You cannot jump across runtime frames: `reflect.Value.Call`, `panic` handling.
+- `JMPBuf` is not thread-safe. One buffer has one owner at any moment.
+- A buffer's holder lives until the buffer is released. Call `Free`.
+- Pointers from captured frames into the base frame (above the snapshot) are not shifted when the
+  stack moves.
+- The package reads runtime internals (`runtime.g`, `runtime.m`, `runtime._defer`,
+  `runtime.writeBarrier`, `runtime.findfunc`, the frame size table). The layout is checked on the
+  first `Set`; on a mismatch `Set` returns `true` and `Err` reports the reason.
