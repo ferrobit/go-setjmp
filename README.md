@@ -30,11 +30,10 @@ type retryLoop struct {
 func main() {
 	loop := &retryLoop{}
 	defer loop.buf.Free()
-	if loop.buf.Set() {
-		if err := loop.buf.Err(); err != nil {
-			fmt.Println(err)
-			return
-		}
+	if set, err := loop.buf.Set(); err != nil {
+		fmt.Println(err)
+		return
+	} else if set {
 		fmt.Println("set")
 	} else {
 		fmt.Println("jumped")
@@ -61,14 +60,13 @@ recursion, a generator that resumes finished frames, error handling — are in
 ## API
 | Method | Description |
 |---|---|
-| `Set() bool` | Saves the stack. Returns `true` when called directly (also on failure, see `Err`) and `false` when resumed by `Jump`. |
+| `Set() (bool, error)` | Saves the stack. Returns `true` when called directly, `false` when resumed by `Jump`, and `false` with an error on failure. |
 | `Jump() error` | Resumes the last `Set` of the buffer. Returns only on failure. |
-| `Err() error` | Reports why the last `Set` failed, or `nil`. |
 | `Free()` | Releases the saved stack. Safe on an unset buffer. |
 | `Debug bool` | Runs a full garbage collection inside `Set` and `Jump`. |
 
 ## Contents
-- `jmpbuf.go` — the `setjmp` package: the `JMPBuf` type (`Set`, `Jump`, `Free`, `Err`).
+- `jmpbuf.go` — the `setjmp` package: the `JMPBuf` type (`Set`, `Jump`, `Free`).
 - `jmpbuf_amd64.s`, `jmpbuf_amd64.go`, `jmpbuf_arm64.s`, `jmpbuf_arm64.go` — CPU-specific parts.
 - `jmpbuf_test.go` — tests (19 of them) and a benchmark.
 - `example_test.go` — usage examples (6 of them), checked by `go test`.
@@ -129,11 +127,11 @@ shifted. This is done once per snapshot and only when the location has changed.
   run when the function returns.
 - You can jump up, down (into frames that have already returned), many times into one buffer,
   from another call of an exported function, and from another thread or goroutine.
-- `Jump` returns only on error. `Err` reports why `Set` failed.
+- `Jump` returns only on error. `Set` returns an error when it cannot save the stack.
 
 ## Limitations
 - amd64 and arm64, Linux, Go 1.23–1.27. arm64 is tested only in the emulator.
-- `defer` inside a loop in captured frames — `Set` refuses (the error is in `Err`).
+- `defer` inside a loop in captured frames — `Set` refuses and returns an error.
 - You cannot jump across runtime frames: `reflect.Value.Call`, `panic` handling.
 - `JMPBuf` is not thread-safe. One buffer has one owner at any moment.
 - A buffer's holder lives until the buffer is released. Call `Free`.
@@ -141,7 +139,7 @@ shifted. This is done once per snapshot and only when the location has changed.
   stack moves.
 - The package reads runtime internals (`runtime.g`, `runtime.m`, `runtime._defer`,
   `runtime.writeBarrier`, `runtime.findfunc`, the frame size table). The layout is checked on the
-  first `Set`; on a mismatch `Set` returns `true` and `Err` reports the reason.
+  first `Set`; on a mismatch `Set` returns `false` and an error with the reason.
 
 ## Maintenance
 

@@ -46,11 +46,9 @@ func Example_generator() {
 func ExampleJMPBuf() {
 	search := &depthSearch{}
 	defer search.buf.Free()
-	if search.buf.Set() {
-		if err := search.buf.Err(); err != nil {
-			fmt.Println(err)
-			return
-		}
+	if set, err := search.buf.Set(); err != nil {
+		fmt.Println(err)
+	} else if set {
 		fmt.Println("search started")
 		search.descend(1)
 		fmt.Println("target not found")
@@ -62,32 +60,21 @@ func ExampleJMPBuf() {
 	// target found at depth 5
 }
 
-func ExampleJMPBuf_Err() {
-	var buf setjmp.JMPBuf
-	defer buf.Free()
-	if buf.Set() {
-		fmt.Println("first Set:", buf.Err())
-	}
-	setWithPendingDefers(&buf)
-	// Output:
-	// first Set: <nil>
-	// second Set: setjmp.Set failed: captured frames have pending heap defer records
-	// deferred call 1
-	// deferred call 0
-}
-
 func ExampleJMPBuf_Free() {
 	var buf setjmp.JMPBuf
 	buf.Free()
-	if buf.Set() {
-		fmt.Println("set:", buf.Err())
+	if set, err := buf.Set(); err != nil {
+		fmt.Println(err)
+		return
+	} else if set {
+		fmt.Println("buffer is set")
 	}
 	buf.Free()
 	if err := buf.Jump(); err != nil {
 		fmt.Println(err)
 	}
 	// Output:
-	// set: <nil>
+	// buffer is set
 	// setjmp.Jump failed: jump buffer is not set
 }
 
@@ -99,11 +86,10 @@ func ExampleJMPBuf_Jump() {
 	loop := &retryLoop{}
 	defer loop.buf.Free()
 	local := "value at Set"
-	if loop.buf.Set() {
-		if err := loop.buf.Err(); err != nil {
-			fmt.Println(err)
-			return
-		}
+	if set, err := loop.buf.Set(); err != nil {
+		fmt.Println(err)
+		return
+	} else if set {
 		local = "value changed before Jump"
 		loop.passes = 1
 		loop.jumpBack()
@@ -119,11 +105,10 @@ func ExampleJMPBuf_Jump() {
 func ExampleJMPBuf_Set() {
 	loop := &retryLoop{}
 	defer loop.buf.Free()
-	if loop.buf.Set() {
-		if err := loop.buf.Err(); err != nil {
-			fmt.Println(err)
-			return
-		}
+	if set, err := loop.buf.Set(); err != nil {
+		fmt.Println(err)
+		return
+	} else if set {
 		fmt.Println("Set returned true: buffer is set")
 	} else {
 		fmt.Println("Set returned false: arrived by Jump")
@@ -139,13 +124,24 @@ func ExampleJMPBuf_Set() {
 	// passes: 3
 }
 
+func ExampleJMPBuf_Set_failure() {
+	var buf setjmp.JMPBuf
+	defer buf.Free()
+	setWithPendingDefers(&buf)
+	// Output:
+	// set: false
+	// error: setjmp.Set failed: captured frames have pending heap defer records
+	// deferred call 1
+	// deferred call 0
+}
+
 func setWithPendingDefers(buf *setjmp.JMPBuf) {
 	for index := range 2 {
 		defer fmt.Println("deferred call", index)
 	}
-	if buf.Set() {
-		fmt.Println("second Set:", buf.Err())
-	}
+	set, err := buf.Set()
+	fmt.Println("set:", set)
+	fmt.Println("error:", err)
 }
 
 func (search *depthSearch) descend(depth int) {
@@ -171,15 +167,15 @@ func (generator *numberGenerator) free() {
 }
 
 func (generator *numberGenerator) next() (int, error) {
-	if generator.caller.Set() {
-		if err := generator.caller.Err(); err != nil {
-			return 0, err
-		} else if !generator.started {
-			generator.started = true
-			generator.produce()
-		} else if err := generator.producer.Jump(); err != nil {
-			return 0, err
-		}
+	if set, err := generator.caller.Set(); err != nil {
+		return 0, err
+	} else if !set {
+		return generator.value, nil
+	} else if !generator.started {
+		generator.started = true
+		generator.produce()
+	} else if err := generator.producer.Jump(); err != nil {
+		return 0, err
 	}
 	return generator.value, generator.err
 }
@@ -188,14 +184,12 @@ func (generator *numberGenerator) produce() {
 	first, second := 0, 1
 	for {
 		generator.value = first
-		if generator.producer.Set() {
-			if err := generator.producer.Err(); err != nil {
-				generator.err = err
-				return
-			} else if err := generator.caller.Jump(); err != nil {
-				generator.err = err
-				return
-			}
+		if set, err := generator.producer.Set(); err != nil {
+			generator.err = err
+			return
+		} else if set {
+			generator.err = generator.caller.Jump()
+			return
 		}
 		first, second = second, first+second
 	}

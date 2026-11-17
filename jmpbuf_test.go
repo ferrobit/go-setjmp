@@ -48,8 +48,7 @@ func BenchmarkSet_Jump(b *testing.B) {
 func TestFree_Unset(t *testing.T) {
 	var buf JMPBuf
 	buf.Free()
-	require.NoError(t, buf.Err())
-	require.True(t, buf.Set())
+	require.True(t, requireSet(t, &buf))
 	buf.Free()
 	require.ErrorContains(t, buf.Jump(), "jump buffer is not set")
 }
@@ -59,7 +58,7 @@ func TestJump_BaseMismatch(t *testing.T) {
 	defer buf.Free()
 	failure := new(error)
 	count := makeCounter()
-	if buf.Set() {
+	if requireSet(t, &buf) {
 		reflect.ValueOf(func() { *failure = buf.Jump() }).Call(nil)
 	}
 	*count++
@@ -72,7 +71,7 @@ func TestJump_DropsDefers(t *testing.T) {
 	defer buf.Free()
 	passes := makeCounter()
 	_, before, _, _ := deferHead()
-	if buf.Set() {
+	if requireSet(t, &buf) {
 		require.NoError(t, jumpWithDefers(&buf, passes))
 	}
 	_, after, _, _ := deferHead()
@@ -99,7 +98,7 @@ func TestJump_StackWords(t *testing.T) {
 	local, saved := 7, makeWord()
 	pointer := &local
 	word := uintptr(unsafe.Pointer(pointer)) &^ 0xFF
-	if buf.Set() {
+	if requireSet(t, &buf) {
 		*saved = word
 		require.NoError(t, growAndJump(&buf, 4000))
 	}
@@ -134,7 +133,7 @@ func TestSet_DeferRecords(t *testing.T) {
 	defer buf.Free()
 	count := makeCounter()
 	_, before, _, _ := deferHead()
-	deferredRecords(&buf, count)
+	deferredRecords(t, &buf, count)
 	if *count == 9 {
 		require.NoError(t, buf.Jump())
 	}
@@ -147,7 +146,7 @@ func TestSet_Defers(t *testing.T) {
 	var buf JMPBuf
 	defer buf.Free()
 	count := makeCounter()
-	deferredStep(&buf, count)
+	deferredStep(t, &buf, count)
 	if *count == 1 {
 		require.NoError(t, buf.Jump())
 	}
@@ -218,8 +217,7 @@ func TestSet_HolderReuse(t *testing.T) {
 	var buf JMPBuf
 	before := settleGoroutines()
 	for range 5000 {
-		require.True(t, buf.Set())
-		require.NoError(t, buf.Err())
+		require.True(t, requireSet(t, &buf))
 	}
 	buf.Free()
 	require.LessOrEqual(t, settleGoroutines(), before+poolLimit+parkLimit)
@@ -238,7 +236,7 @@ func TestSet_HolderReuse(t *testing.T) {
 		for writeBarrier.enabled {
 			runtime.Gosched()
 		}
-		require.True(t, buf.Set())
+		require.True(t, requireSet(t, &buf))
 		buf.Free()
 	}
 	shared.lock.Lock()
@@ -252,7 +250,7 @@ func TestSet_Liveness(t *testing.T) {
 	for range 50 {
 		buf := &JMPBuf{}
 		passes := makeCounter()
-		total := sumOnJump(buf)
+		total := sumOnJump(t, buf)
 		*passes++
 		if *passes == 1 {
 			require.Equal(t, -1, total)
@@ -296,8 +294,9 @@ func TestSet_PendingDefer(t *testing.T) {
 	for range pendingCount(1) {
 		defer keep(nil)
 	}
-	require.True(t, buf.Set())
-	require.ErrorContains(t, buf.Err(), "captured frames have pending heap defer records")
+	set, err := buf.Set()
+	require.False(t, set)
+	require.ErrorContains(t, err, "captured frames have pending heap defer records")
 	require.ErrorContains(t, buf.Jump(), "captured frames have pending heap defer records")
 }
 
@@ -306,7 +305,7 @@ func TestSet_Repeated(t *testing.T) {
 	defer buf.Free()
 	count := makeCounter()
 	local := 10
-	if buf.Set() {
+	if requireSet(t, &buf) {
 		local = 20
 	}
 	*count++
@@ -328,7 +327,7 @@ func TestSet_StackGrowth(t *testing.T) {
 		count := makeCounter()
 		values := [8]int{1, 2, 3, 4, 5, 6, 7, 8}
 		pointer := &values[3]
-		if buf.Set() {
+		if requireSet(t, &buf) {
 			*count++
 			values[3] = 100
 			require.Equal(t, 100, *pointer)
@@ -344,7 +343,7 @@ func TestSet_StackGrowth(t *testing.T) {
 		var buf JMPBuf
 		stop := startCollector()
 		trail := makeTrail()
-		total := descendAndSet(&buf, 3000, trail)
+		total := descendAndSet(t, &buf, 3000, trail)
 		if len(*trail) == 1 {
 			runtime.GC()
 			require.NoError(t, buf.Jump())
@@ -359,8 +358,7 @@ func TestSet_StackGrowth(t *testing.T) {
 func TestSet_Traceback(t *testing.T) {
 	{
 		var buf JMPBuf
-		require.True(t, buf.Set())
-		require.NoError(t, buf.Err())
+		require.True(t, requireSet(t, &buf))
 		dump := make([]byte, 1<<20)
 		dump = dump[:runtime.Stack(dump, true)]
 		require.Contains(t, string(dump), "setjmp.hold(")
@@ -377,7 +375,7 @@ func TestSet_Traceback(t *testing.T) {
 }
 
 //go:noinline
-func deferredRecords(buf *JMPBuf, count *int) {
+func deferredRecords(t *testing.T, buf *JMPBuf, count *int) {
 	defer func() { *count++ }()
 	defer func() { *count++ }()
 	defer func() { *count++ }()
@@ -387,23 +385,23 @@ func deferredRecords(buf *JMPBuf, count *int) {
 	defer func() { *count++ }()
 	defer func() { *count++ }()
 	defer func() { *count++ }()
-	buf.Set()
+	requireSet(t, buf)
 	runtime.GC()
 }
 
 //go:noinline
-func deferredStep(buf *JMPBuf, count *int) {
+func deferredStep(t *testing.T, buf *JMPBuf, count *int) {
 	defer func() { *count++ }()
-	buf.Set()
+	requireSet(t, buf)
 }
 
 //go:noinline
-func descendAndSet(buf *JMPBuf, depth int, trail *[]int) int {
+func descendAndSet(t *testing.T, buf *JMPBuf, depth int, trail *[]int) int {
 	var pad [128]byte
 	pad[0], pad[127] = byte(depth), byte(depth>>8)
 	if depth > 0 {
-		return descendAndSet(buf, depth-1, trail) + int(pad[0]) + int(pad[127])
-	} else if buf.Set() {
+		return descendAndSet(t, buf, depth-1, trail) + int(pad[0]) + int(pad[127])
+	} else if requireSet(t, buf) {
 		*trail = append(*trail, 1)
 	} else {
 		*trail = append(*trail, 2)
@@ -493,7 +491,11 @@ func migrateSource(buf *JMPBuf, result chan string, done chan struct{}) {
 	text := "jumped: "
 	pointer := &text
 	chain := makeChain(64)
-	if buf.Set() {
+	if set, err := buf.Set(); err != nil {
+		result <- err.Error()
+		close(done)
+		return
+	} else if set {
 		result <- "set"
 		close(done)
 		return
@@ -511,6 +513,12 @@ func migrateTarget(buf *JMPBuf, result chan string) {
 //go:noinline
 func pendingCount(count int) int {
 	return count
+}
+
+func requireSet(t *testing.T, buf *JMPBuf) bool {
+	set, err := buf.Set()
+	require.NoError(t, err)
+	return set
 }
 
 func runGenerator(count int) error {
@@ -561,9 +569,9 @@ func startCollector() func() {
 }
 
 //go:noinline
-func sumOnJump(buf *JMPBuf) int {
+func sumOnJump(t *testing.T, buf *JMPBuf) int {
 	chain := makeChain(1000)
-	if buf.Set() {
+	if requireSet(t, buf) {
 		return -1
 	}
 	return sumChain(chain)
@@ -578,7 +586,9 @@ func sumChain(node *testNode) int {
 }
 
 func (scenario *testScenario) exported() {
-	if scenario.one.Set() {
+	if set, err := scenario.one.Set(); err != nil {
+		scenario.err = err
+	} else if set {
 		scenario.events = append(scenario.events, "one: set")
 		scenario.internal()
 	} else {
@@ -597,7 +607,9 @@ func (scenario *testScenario) internal() {
 	pointer := &text
 	chain := makeChain(1000)
 	scenario.events = append(scenario.events, "internal: enter")
-	if scenario.two.Set() {
+	if set, err := scenario.two.Set(); err != nil {
+		scenario.err = err
+	} else if set {
 		scenario.err = scenario.one.Jump()
 	} else {
 		scenario.events = append(scenario.events, "two: jumped")
@@ -615,7 +627,9 @@ func (generator *testGenerator) free() {
 }
 
 func (generator *testGenerator) next() int {
-	if generator.caller.Set() {
+	if set, err := generator.caller.Set(); err != nil {
+		generator.err = err
+	} else if set {
 		if !generator.started {
 			generator.started = true
 			generator.produce()
@@ -631,7 +645,10 @@ func (generator *testGenerator) produce() {
 	chain := makeChain(64)
 	for {
 		generator.value = first
-		if generator.producer.Set() {
+		if set, err := generator.producer.Set(); err != nil {
+			generator.err = err
+			return
+		} else if set {
 			if err := generator.caller.Jump(); err != nil {
 				generator.err = err
 				return

@@ -13,7 +13,7 @@
 // that also contains the [JMPBuf]. Deferred calls of abandoned frames are not run, as in C.
 //
 // The package reads runtime internals. It supports Linux with Go 1.23 to 1.27, checks the
-// runtime layout on the first Set, and reports a mismatch through [JMPBuf.Err].
+// runtime layout on the first Set, and reports a mismatch as an error from [JMPBuf.Set].
 package setjmp
 
 import (
@@ -533,15 +533,9 @@ func (holder *stackHolder) resolve() error {
 	return err
 }
 
-// Err reports why the last [JMPBuf.Set] failed. It returns nil if Set succeeded or the buffer
-// is unset. [JMPBuf.Free] resets it to nil.
-func (buf *JMPBuf) Err() error {
-	return buf.err
-}
-
-// Free releases the saved stack and the goroutine that holds it, and clears [JMPBuf.Err].
-// The Debug field is kept. Free is safe on an unset buffer and may be called more than once.
-// After Free, [JMPBuf.Jump] fails until the next [JMPBuf.Set].
+// Free releases the saved stack and the goroutine that holds it. The Debug field is kept.
+// Free is safe on an unset buffer and may be called more than once. After Free, [JMPBuf.Jump]
+// fails until the next [JMPBuf.Set].
 func (buf *JMPBuf) Free() {
 	shared.release(buf.holder)
 	buf.holder, buf.err = nil, nil
@@ -565,17 +559,16 @@ func (buf *JMPBuf) Jump() error {
 	return nil
 }
 
-// Set saves the stack from the caller of Set up to the base frame and returns true. When
-// [JMPBuf.Jump] resumes the buffer, this Set call returns again, this time with false.
-// Setting the buffer again replaces the previous snapshot.
+// Set saves the stack from the caller of Set up to the base frame and returns true and nil.
+// When [JMPBuf.Jump] resumes the buffer, this Set call returns again, this time with false
+// and nil. Setting the buffer again replaces the previous snapshot.
 //
-// Set also returns true on failure: then [JMPBuf.Err] reports the reason and the buffer becomes
-// unset. So check Err whenever Set returns true:
+// On failure Set returns false and an error, and the buffer becomes unset. So check the error
+// first:
 //
-//	if buf.Set() {
-//		if err := buf.Err(); err != nil {
-//			return err
-//		}
+//	if set, err := buf.Set(); err != nil {
+//		return err
+//	} else if set {
 //		fmt.Println("buffer is set")
 //	} else {
 //		fmt.Println("resumed by Jump")
@@ -583,11 +576,15 @@ func (buf *JMPBuf) Jump() error {
 //
 // Set fails if a captured frame has a pending defer statement inside a loop, or if the runtime
 // layout differs from the one the package expects.
-func (buf *JMPBuf) Set() bool {
+func (buf *JMPBuf) Set() (bool, error) {
 	if err := supported(); err != nil {
 		buf.Free()
 		buf.err = fmt.Errorf("setjmp.Set failed: %w", err)
-		return true
+		return false, buf.err
+	} else if !setjmp(buf) {
+		return false, nil
+	} else if buf.err != nil {
+		return false, buf.err
 	}
-	return setjmp(buf)
+	return true, nil
 }

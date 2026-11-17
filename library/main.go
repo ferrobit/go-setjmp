@@ -36,7 +36,10 @@ var shared = makeValueSequence(1)
 //export Exported
 func Exported() C.int {
 	one.Debug, two.Debug = true, true
-	if one.Set() {
+	if set, err := one.Set(); err != nil {
+		fmt.Fprintf(os.Stderr, "Exported failed: %v\n", err)
+		return 1
+	} else if set {
 		fmt.Println("one: set")
 		Internal()
 	} else {
@@ -95,7 +98,9 @@ func Internal() {
 	p := &s
 	chain := makeChain(1, chainLength)
 	fmt.Println("internal: enter")
-	if two.Set() {
+	if set, err := two.Set(); err != nil {
+		fmt.Fprintf(os.Stderr, "Internal failed: %v\n", err)
+	} else if set {
 		if err := one.Jump(); err != nil {
 			fmt.Fprintf(os.Stderr, "Internal failed: %v\n", err)
 		}
@@ -141,15 +146,15 @@ func (sequence *valueSequence) free() {
 }
 
 func (sequence *valueSequence) next() uint64 {
-	if sequence.caller.Set() {
-		if err := sequence.caller.Err(); err != nil {
-			sequence.err = err
-		} else if !sequence.started {
-			sequence.started = true
-			sequence.produce()
-		} else if err := sequence.producer.Jump(); err != nil {
-			sequence.err = err
-		}
+	if set, err := sequence.caller.Set(); err != nil {
+		sequence.err = err
+	} else if !set {
+		return sequence.value
+	} else if !sequence.started {
+		sequence.started = true
+		sequence.produce()
+	} else if err := sequence.producer.Jump(); err != nil {
+		sequence.err = err
 	}
 	return sequence.value
 }
@@ -160,7 +165,10 @@ func (sequence *valueSequence) produce() {
 		state = advance(state)
 		chain := makeChain(state, chainLength)
 		sequence.value = state
-		if sequence.producer.Set() {
+		if set, err := sequence.producer.Set(); err != nil {
+			sequence.err = err
+			return
+		} else if set {
 			if err := sequence.caller.Jump(); err != nil {
 				sequence.err = err
 				return
