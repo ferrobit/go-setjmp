@@ -1,4 +1,8 @@
-# setjmp — setjmp/longjmp for Go (amd64, arm64)
+<p align="center">
+  <img src="docs/logo.png" alt="go-setjmp logo" width="460">
+</p>
+
+# go-setjmp — setjmp/longjmp for Go (amd64, arm64)
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/ferrobit/go-setjmp.svg)](https://pkg.go.dev/github.com/ferrobit/go-setjmp)
 
@@ -71,17 +75,24 @@ recursion, a generator that resumes finished frames, error handling — are in
 - `library/main.go` — a shared library (`-buildmode=c-shared`) that exports
   `Exported`, `Next`, `Checksum`, `Reference`, `Collect`.
 - `application/main.c` — a C application that calls the library from several threads.
+- `Makefile` — build, test and stress targets (see below).
+- `docs/logo.svg`, `docs/logo.png` — the logo (SVG source and its PNG rendering).
 
 ## Building and testing
-The build file is named `build.mk`; it can be renamed to `Makefile`.
-- `make -f build.mk test` — `go vet` and tests with coverage.
-- `make -f build.mk run` — builds the library and the application and runs them (normally and
+- `make test` — `go vet` and tests with coverage.
+- `make run` — builds the library and the application and runs them (normally and
   under garbage collector pressure).
-- `make -f build.mk stress` — tests with `GOGC=1`, `gccheckmark=1`, `clobberfree=1`.
-- `make -f build.mk test-arm64` and `run-arm64` — the same for arm64 via the
+- `make stress` — tests with `GOGC=1`, `gccheckmark=1`, `clobberfree=1`.
+- `make clean` — removes the `build` directory.
+- `make test-arm64` and `make run-arm64` — the same for arm64 via the
   `qemu-aarch64-static` emulator and the `aarch64-linux-gnu-gcc` cross compiler.
 
 ## How it works
+C `setjmp` saves a few registers and `longjmp` restores them. This is not enough in Go: goroutine
+stacks move and grow, and the garbage collector must find every pointer on them. So the package
+saves the stack frames themselves and keeps them as real frames on a parked goroutine, where the
+runtime treats them like any other stack.
+
 1. `Set` finds the "base": the first frame called from the runtime (`runtime.*`) or from a cgo
    wrapper (`_cgoexp_*`). Everything from the `Set` call site up to the base is captured.
 2. The frames are copied into a pointer-free buffer. The copy is handed to a "holder" goroutine:
@@ -131,6 +142,66 @@ shifted. This is done once per snapshot and only when the location has changed.
 - The package reads runtime internals (`runtime.g`, `runtime.m`, `runtime._defer`,
   `runtime.writeBarrier`, `runtime.findfunc`, the frame size table). The layout is checked on the
   first `Set`; on a mismatch `Set` returns `true` and `Err` reports the reason.
+
+## Maintenance
+
+### Development
+- Requirements: Linux, Go 1.23+, `gcc`. For arm64: `qemu-aarch64-static` and
+  `aarch64-linux-gnu-gcc`.
+- Before a commit: `make test`, `make stress`, `make run`, and on assembly changes also
+  `make test-arm64` and `make run-arm64`. Format with `gofmt` only.
+- A new Go release: run `GOTOOLCHAIN=go1.X make test stress run`. If `Set` reports a layout error,
+  compare the package with the new runtime sources:
+
+| Package | Runtime source |
+|---|---|
+| `g_lo`, `g_hi`, `g_defer`, `g_m` in `jmpbuf_*.s` | `runtime.g` in `runtime/runtime2.go` |
+| `defer_sp`, `defer_link` in `jmpbuf_*.s` | `runtime._defer` in `runtime/runtime2.go` |
+| `funcHeader` in `jmpbuf.go` | `runtime._func` in `runtime/runtime2.go` |
+| `moduleData` in `jmpbuf.go` | `runtime.moduledata` in `runtime/symtab.go` |
+| `writeBarrier` in `jmpbuf.go` | `runtime.writeBarrier` in `runtime/mgc.go` |
+| `lockDistance` in `jmpbuf.go` | `runtime.m`: from `curg` to `lockedExt` |
+
+A wrong `lockDistance` does not break the package: it silently switches to the slower
+channel-based holders (`TestSet_ChannelMode` catches this). When everything passes, raise the
+Go version range in this README.
+
+### Porting to another architecture
+The package walks the stack by the frame pointer chain. Go keeps frame pointers only on amd64 and
+arm64, so these two ports are the simple case. Other 64-bit targets (riscv64, loong64, ppc64le,
+s390x) have no frame pointers: a port also needs a frame walker based on the runtime frame size
+table (`frameSize` in `jmpbuf_arm64.go` already decodes it). 32-bit targets also need a
+different `wordSize`.
+
+Steps:
+1. Add the architecture to the `//go:build` line of `jmpbuf.go`, `jmpbuf_test.go` and
+   `example_test.go`.
+2. Create `jmpbuf_<arch>.go` with:
+   - `linkSize` — the size of the frame link saved by a call (return address and frame pointer);
+   - `regionEnd` — where the base frame ends (amd64: at the link; arm64: by the frame size table);
+   - `verifyFrames` — a run-time check of these assumptions (may be empty).
+3. Create `jmpbuf_<arch>.s`. Start from `jmpbuf_arm64.s` for register-based `g` (RISC targets) or
+   from `jmpbuf_amd64.s` for `g` in thread-local storage. Functions to implement:
+
+| Function | Job |
+|---|---|
+| `setjmp`, `longjmp` | Entry points: pass the stack and frame pointers to `capture` and `launch`. |
+| `snapshot` | Copy stack words into the image. |
+| `anchor`, `graft` | Lay the image out on the holder stack, shift addresses, link defer records, continue in `hold`. |
+| `discard` | Drop the holder frames and their defer records. |
+| `restore` | Copy the image below the base, shift the marked words, relink defer records, return from `Set` with `false`. |
+| `current`, `threadWord` | Read the current `g` and a word of its `m`. |
+| `deferHead`, `scanDefers` | Read the defer chain of `g`. |
+| `stackOffset`, `stackDepth`, `stackFree` | Measure positions against the stack bounds of `g`. |
+
+4. Set the offsets (`g_lo` … `defer_link`) from `runtime/runtime2.go`; `verify` checks them on
+   the first `Set`.
+5. Add `test-<arch>` and `run-<arch>` targets to the `Makefile` with `qemu-<arch>-static` and a
+   cross compiler. Under emulation keep `GODEBUG=asyncpreemptoff=1` and skip
+   `TestSet_Traceback`, as `test-arm64` does.
+6. The port is done when `make test-<arch>` passes all tests and examples, the stress options
+   pass, and `make run-<arch>` reports 0 failures. Then add the architecture to the README
+   title and to [Limitations](#limitations).
 
 ## License
 [MIT](LICENSE).
