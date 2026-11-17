@@ -250,4 +250,14 @@ Steps:
    title and to [Limitations](#limitations).
 
 ## License
-[MIT](LICENSE).
+go-setjmp is free software distributed under the [MIT License](LICENSE.md), one of the most
+permissive open source licenses. In short:
+- **You may** use, copy, modify, merge, publish, distribute, sublicense and sell the software,
+  in open source and in closed-source commercial products alike.
+- **You must** keep the copyright notice and the license text in all copies or substantial
+  portions of the software.
+- **No warranty:** the software is provided "as is", and the authors are not liable for any
+  claim or damages arising from its use.
+
+This summary is for convenience only; the full text in [LICENSE.md](LICENSE.md) is what applies.
+SPDX identifier: `MIT`.
