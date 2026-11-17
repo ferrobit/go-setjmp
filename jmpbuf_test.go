@@ -4,11 +4,14 @@ package setjmp
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"iter"
 	"reflect"
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -37,12 +40,211 @@ type testGenerator struct {
 	err      error
 }
 
+type valueGenerator struct {
+	caller   JMPBuf
+	producer JMPBuf
+	started  bool
+	value    int
+	err      error
+}
+
+type latencyRecorder struct {
+	samples []time.Duration
+	start   time.Time
+}
+
+func BenchmarkChannel_Generator(b *testing.B) {
+	values, stop := make(chan int), make(chan struct{})
+	defer close(stop)
+	go sendValues(values, stop)
+	recorder := makeLatencyRecorder(b)
+	for index := range b.N {
+		recorder.begin()
+		value := <-values
+		recorder.end()
+		if value != index {
+			require.Equal(b, index, value)
+		}
+	}
+	recorder.report(b)
+}
+
+func BenchmarkChannel_GeneratorLocked(b *testing.B) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	BenchmarkChannel_Generator(b)
+}
+
+func BenchmarkError_Unwind100(b *testing.B) {
+	recorder := makeLatencyRecorder(b)
+	for range b.N {
+		recorder.begin()
+		err := failAtDepth(100)
+		recorder.end()
+		require.Error(b, err)
+	}
+	recorder.report(b)
+}
+
+func BenchmarkError_Wrap100(b *testing.B) {
+	recorder := makeLatencyRecorder(b)
+	for range b.N {
+		recorder.begin()
+		err := wrapAtDepth(100)
+		recorder.end()
+		require.Error(b, err)
+	}
+	recorder.report(b)
+}
+
+func BenchmarkJump_Generator(b *testing.B) {
+	benchmarkGenerator(b)
+}
+
+func BenchmarkJump_GeneratorChannel(b *testing.B) {
+	require.NoError(b, supported())
+	locks := shared.locks
+	shared.locks = 0
+	benchmarkGenerator(b)
+	shared.locks = locks
+}
+
+func BenchmarkJump_GeneratorCollector(b *testing.B) {
+	stop := startCollector()
+	benchmarkGenerator(b)
+	stop()
+}
+
+func BenchmarkJump_GeneratorLocked(b *testing.B) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	benchmarkGenerator(b)
+}
+
+func BenchmarkJump_Migration(b *testing.B) {
+	var buf JMPBuf
+	defer buf.Free()
+	recorder := makeLatencyRecorder(b)
+	done := make(chan error)
+	go relaySource(&buf, recorder, done)
+	require.NoError(b, <-done)
+	b.ResetTimer()
+	for range b.N {
+		recorder.begin()
+		go relayTarget(&buf, done)
+		require.NoError(b, <-done)
+	}
+	recorder.report(b)
+}
+
+func BenchmarkJump_Repeated(b *testing.B) {
+	var buf JMPBuf
+	defer buf.Free()
+	recorder := makeLatencyRecorder(b)
+	if set, err := buf.Set(); err != nil {
+		require.NoError(b, err)
+	} else if !set {
+		recorder.end()
+	}
+	if len(recorder.samples) < b.N {
+		recorder.begin()
+		require.NoError(b, buf.Jump())
+	}
+	recorder.report(b)
+}
+
+func BenchmarkJump_Unwind100(b *testing.B) {
+	var buf JMPBuf
+	defer buf.Free()
+	recorder := makeLatencyRecorder(b)
+	if set, err := buf.Set(); err != nil {
+		require.NoError(b, err)
+	} else if !set {
+		recorder.end()
+	}
+	if len(recorder.samples) < b.N {
+		recorder.begin()
+		require.NoError(b, jumpFromDepth(&buf, 100))
+	}
+	recorder.report(b)
+}
+
+func BenchmarkPanic_Unwind100(b *testing.B) {
+	recorder := makeLatencyRecorder(b)
+	for range b.N {
+		recorder.begin()
+		err := recoverFromDepth(100)
+		recorder.end()
+		require.Error(b, err)
+	}
+	recorder.report(b)
+}
+
+func BenchmarkPull_Generator(b *testing.B) {
+	next, stop := iter.Pull(countValues)
+	defer stop()
+	recorder := makeLatencyRecorder(b)
+	for index := range b.N {
+		recorder.begin()
+		value, _ := next()
+		recorder.end()
+		if value != index {
+			require.Equal(b, index, value)
+		}
+	}
+	recorder.report(b)
+}
+
+func BenchmarkSet_Depth100(b *testing.B) {
+	var buf JMPBuf
+	defer buf.Free()
+	recorder := makeLatencyRecorder(b)
+	setAtDepth(b, &buf, recorder, 100)
+	recorder.report(b)
+}
+
+func BenchmarkSet_Depth1000(b *testing.B) {
+	var buf JMPBuf
+	defer buf.Free()
+	recorder := makeLatencyRecorder(b)
+	setAtDepth(b, &buf, recorder, 1000)
+	recorder.report(b)
+}
+
+func BenchmarkSet_Free(b *testing.B) {
+	var buf JMPBuf
+	recorder := makeLatencyRecorder(b)
+	for range b.N {
+		recorder.begin()
+		set, err := buf.Set()
+		buf.Free()
+		recorder.end()
+		require.NoError(b, err)
+		require.True(b, set)
+	}
+	recorder.report(b)
+}
+
 func BenchmarkSet_Jump(b *testing.B) {
 	generator := &testGenerator{}
 	for range b.N {
 		generator.next()
 	}
 	generator.free()
+}
+
+func BenchmarkSet_Repeated(b *testing.B) {
+	var buf JMPBuf
+	defer buf.Free()
+	recorder := makeLatencyRecorder(b)
+	for range b.N {
+		recorder.begin()
+		set, err := buf.Set()
+		recorder.end()
+		require.NoError(b, err)
+		require.True(b, set)
+	}
+	recorder.report(b)
 }
 
 func TestFree_Unset(t *testing.T) {
@@ -374,6 +576,27 @@ func TestSet_Traceback(t *testing.T) {
 	}
 }
 
+func benchmarkGenerator(b *testing.B) {
+	generator := &valueGenerator{}
+	defer generator.free()
+	recorder := makeLatencyRecorder(b)
+	for index := range b.N {
+		recorder.begin()
+		value := generator.next()
+		recorder.end()
+		if value != index {
+			require.Equal(b, index, value)
+		}
+	}
+	recorder.report(b)
+	require.NoError(b, generator.err)
+}
+
+func countValues(yield func(int) bool) {
+	for value := 0; yield(value); value++ {
+	}
+}
+
 //go:noinline
 func deferredRecords(t *testing.T, buf *JMPBuf, count *int) {
 	defer func() { *count++ }()
@@ -415,6 +638,14 @@ func descendTotal(depth int) int {
 		result += int(byte(index)) + int(byte(index>>8))
 	}
 	return result
+}
+
+//go:noinline
+func failAtDepth(depth int) error {
+	if depth > 0 {
+		return failAtDepth(depth - 1)
+	}
+	return errors.New("value does not exist")
 }
 
 func fibonacci(count int) int {
@@ -468,6 +699,14 @@ func jumpWithDefers(buf *JMPBuf, passes *int) error {
 }
 
 //go:noinline
+func jumpFromDepth(buf *JMPBuf, depth int) error {
+	if depth > 0 {
+		return jumpFromDepth(buf, depth-1)
+	}
+	return buf.Jump()
+}
+
+//go:noinline
 func makeCounter() *int {
 	return new(int)
 }
@@ -475,6 +714,13 @@ func makeCounter() *int {
 //go:noinline
 func makeGarbage(size int) []byte {
 	return make([]byte, size)
+}
+
+//go:noinline
+func makeLatencyRecorder(b *testing.B) *latencyRecorder {
+	result := &latencyRecorder{samples: make([]time.Duration, 0, b.N)}
+	b.ResetTimer()
+	return result
 }
 
 //go:noinline
@@ -511,8 +757,46 @@ func migrateTarget(buf *JMPBuf, result chan string) {
 }
 
 //go:noinline
+func panicAtDepth(depth int) {
+	if depth > 0 {
+		panicAtDepth(depth - 1)
+		return
+	}
+	panic(errors.New("value does not exist"))
+}
+
+//go:noinline
 func pendingCount(count int) int {
 	return count
+}
+
+func recoverFromDepth(depth int) error {
+	failure := make(chan error, 1)
+	func() {
+		defer func() {
+			if value, ok := recover().(error); ok {
+				failure <- value
+			}
+		}()
+		panicAtDepth(depth)
+	}()
+	return <-failure
+}
+
+func relaySource(buf *JMPBuf, recorder *latencyRecorder, done chan error) {
+	if set, err := buf.Set(); err != nil {
+		done <- err
+		return
+	} else if !set {
+		recorder.end()
+	}
+	done <- nil
+}
+
+func relayTarget(buf *JMPBuf, done chan error) {
+	if err := buf.Jump(); err != nil {
+		done <- err
+	}
 }
 
 func requireSet(t *testing.T, buf *JMPBuf) bool {
@@ -532,6 +816,31 @@ func runGenerator(count int) error {
 		}
 	}
 	return nil
+}
+
+func sendValues(values chan int, stop chan struct{}) {
+	for value := 0; ; value++ {
+		select {
+		case values <- value:
+		case <-stop:
+			return
+		}
+	}
+}
+
+//go:noinline
+func setAtDepth(b *testing.B, buf *JMPBuf, recorder *latencyRecorder, depth int) {
+	if depth > 0 {
+		setAtDepth(b, buf, recorder, depth-1)
+		return
+	}
+	for range b.N {
+		recorder.begin()
+		set, err := buf.Set()
+		recorder.end()
+		require.NoError(b, err)
+		require.True(b, set)
+	}
 }
 
 func settleGoroutines() int {
@@ -583,6 +892,34 @@ func sumChain(node *testNode) int {
 		result += node.value
 	}
 	return result
+}
+
+func wrapAtDepth(depth int) error {
+	if depth > 0 {
+		if err := wrapAtDepth(depth - 1); err != nil {
+			return fmt.Errorf("failed to unwind level %v: %w", depth, err)
+		}
+		return nil
+	}
+	return errors.New("value does not exist")
+}
+
+func (recorder *latencyRecorder) begin() {
+	recorder.start = time.Now()
+}
+
+func (recorder *latencyRecorder) end() {
+	recorder.samples = append(recorder.samples, time.Since(recorder.start))
+}
+
+func (recorder *latencyRecorder) report(b *testing.B) {
+	b.StopTimer()
+	if count := len(recorder.samples); count != 0 {
+		slices.Sort(recorder.samples)
+		b.ReportMetric(float64(recorder.samples[count/2]), "p50-ns")
+		b.ReportMetric(float64(recorder.samples[count*99/100]), "p99-ns")
+		b.ReportMetric(float64(recorder.samples[count-1]), "max-ns")
+	}
 }
 
 func (scenario *testScenario) exported() {
@@ -660,5 +997,37 @@ func (generator *testGenerator) produce() {
 			return
 		}
 		first, second = second, first+second
+	}
+}
+
+func (generator *valueGenerator) free() {
+	generator.caller.Free()
+	generator.producer.Free()
+}
+
+func (generator *valueGenerator) next() int {
+	if set, err := generator.caller.Set(); err != nil {
+		generator.err = err
+	} else if set && !generator.started {
+		generator.started = true
+		generator.produce()
+	} else if set {
+		if err := generator.producer.Jump(); err != nil {
+			generator.err = err
+		}
+	}
+	return generator.value
+}
+
+func (generator *valueGenerator) produce() {
+	for value := 0; ; value++ {
+		generator.value = value
+		if set, err := generator.producer.Set(); err != nil {
+			generator.err = err
+			return
+		} else if set {
+			generator.err = generator.caller.Jump()
+			return
+		}
 	}
 }

@@ -76,7 +76,7 @@ Complete programs are in [examples](examples); `make examples` runs the Go ones:
 ## Contents
 - `jmpbuf.go` — the `setjmp` package: the `JMPBuf` type (`Set`, `Jump`, `Free`).
 - `jmpbuf_amd64.s`, `jmpbuf_amd64.go`, `jmpbuf_arm64.s`, `jmpbuf_arm64.go` — CPU-specific parts.
-- `jmpbuf_test.go` — tests (19 of them) and a benchmark.
+- `jmpbuf_test.go` — tests (19 of them) and benchmarks (18 of them).
 - `example_test.go` — usage examples (6 of them), checked by `go test`.
 - `examples/cgo/library/main.go` — a shared library (`-buildmode=c-shared`) that exports
   `Exported`, `Next`, `Checksum`, `Reference`, `Collect`.
@@ -91,6 +91,7 @@ Complete programs are in [examples](examples); `make examples` runs the Go ones:
 - `make run` — builds the library and the application and runs them (normally and
   under garbage collector pressure).
 - `make stress` — tests with `GOGC=1`, `gccheckmark=1`, `clobberfree=1`.
+- `make bench` — benchmarks with latency percentiles (see [Performance](#performance)).
 - `make examples` — runs the Go programs from `examples` (`parser`, `samefringe`).
 - `make clean` — removes the `build` directory.
 - `make test-arm64`, `make run-arm64` and `make examples-arm64` — the same for arm64 via the
@@ -120,6 +121,41 @@ runtime treats them like any other stack.
   separately for each locked thread.
 - The fallback is channel-based holders. It is enabled automatically if the package does not
   find the thread-locking counters in the runtime.
+
+### Measured latency
+`make bench` runs the benchmarks from `jmpbuf_test.go`. Each one reports the mean time (`ns/op`)
+and the latency of single operations: `p50-ns`, `p99-ns` and `max-ns`. A single measurement
+includes about 30 ns of timer overhead. Results on a cloud VM with 2 vCPU (Intel Xeon, 2.1 GHz),
+Linux, Go 1.24.7:
+
+| Scenario | Benchmark | p50, ns | p99, ns |
+|---|---|---:|---:|
+| `Set` on a set buffer (the holder is reused) | `Set_Repeated` | 360 | 544 |
+| `Set` and `Free` (a pooled holder) | `Set_Free` | 587 | 1122 |
+| `Set` with 100 extra frames | `Set_Depth100` | 2226 | 5585 |
+| `Set` with 1000 extra frames | `Set_Depth1000` | 18791 | 50725 |
+| `Jump` back to the same `Set` | `Jump_Repeated` | 131 | 262 |
+| `Jump` to another goroutine, with its `go` statement | `Jump_Migration` | 265 | 1168 |
+| Exit from 100 frames deep with `Jump` | `Jump_Unwind100` | 949 | 1548 |
+| The same with `panic` and `recover` | `Panic_Unwind100` | 1734 | 4487 |
+| The same with plain `error` returns | `Error_Unwind100` | 180 | 330 |
+| The same with `fmt.Errorf` at every level | `Error_Wrap100` | 43883 | 313705 |
+| Generator value: two `Set` and two `Jump` | `Jump_Generator` | 918 | 1652 |
+| The same on a locked thread, as in cgo calls | `Jump_GeneratorLocked` | 900 | 1774 |
+| The same with channel-based holders | `Jump_GeneratorChannel` | 3582 | 15477 |
+| The same under a constantly running garbage collector | `Jump_GeneratorCollector` | 1049 | 93154 |
+| Generator value with `iter.Pull` | `Pull_Generator` | 102 | 219 |
+| Generator value with an unbuffered channel | `Channel_Generator` | 298 | 794 |
+| The same on a locked thread | `Channel_GeneratorLocked` | 9345 | 43161 |
+
+What follows from the numbers:
+- `Set` costs about 20 ns per captured frame, so keep the base frame close to the `Set` call.
+- `Jump` leaves deep recursion about 2 times faster than `panic`, but plain `error` returns are
+  still about 5 times faster.
+- A generator on this package is about 9 times slower than `iter.Pull`. On a locked thread it
+  is about 10 times faster than a channel.
+- During a garbage collector mark phase `Set` waits for the phase to end, so p99 grows to tens
+  of microseconds.
 
 ## Addresses when the stack moves
 If a snapshot is restored to a different place (the stack grew, another goroutine, another

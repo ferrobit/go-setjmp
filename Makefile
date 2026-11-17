@@ -10,7 +10,7 @@ CGO_EXAMPLE := $(EXAMPLES)/cgo
 GO_EXAMPLES := parser samefringe
 SOURCES := $(wildcard *.go *.s $(CGO_EXAMPLE)/library/*.go)
 
-.PHONY: all test stress run examples test-arm64 run-arm64 examples-arm64 clean
+.PHONY: all test stress bench run examples test-arm64 run-arm64 examples-arm64 clean
 
 all: $(APPLICATION)
 
@@ -26,6 +26,9 @@ test:
 
 stress:
 	GOGC=1 GODEBUG=gccheckmark=1,clobberfree=1 $(GO) test -count=10 -cpu=1,2,4 .
+
+bench:
+	$(GO) test -count=1 -run '^$$' -bench . -benchmem .
 
 run: $(APPLICATION)
 	$(APPLICATION)
