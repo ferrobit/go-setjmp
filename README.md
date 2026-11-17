@@ -57,6 +57,14 @@ passes: 3
 recursion, a generator that resumes finished frames, error handling — are in
 [example_test.go](example_test.go) and on [pkg.go.dev](https://pkg.go.dev/github.com/ferrobit/go-setjmp#pkg-examples).
 
+Complete programs are in [examples](examples); `make examples` runs the Go ones:
+- [parser](examples/parser/main.go) — an expression calculator. Any error, even from 10000 nested
+  parentheses, leaves the recursion with one `Jump`: `go run ./examples/parser`.
+- [samefringe](examples/samefringe/main.go) — the "same fringe" problem: two recursive tree
+  walkers are resumed in turn to compare the leaves of trees of different shapes, without
+  goroutines or channels: `go run ./examples/samefringe`.
+- [cgo](examples/cgo) — a shared library and a multithreaded C application: `make run`.
+
 ## API
 | Method | Description |
 |---|---|
@@ -70,9 +78,11 @@ recursion, a generator that resumes finished frames, error handling — are in
 - `jmpbuf_amd64.s`, `jmpbuf_amd64.go`, `jmpbuf_arm64.s`, `jmpbuf_arm64.go` — CPU-specific parts.
 - `jmpbuf_test.go` — tests (19 of them) and a benchmark.
 - `example_test.go` — usage examples (6 of them), checked by `go test`.
-- `library/main.go` — a shared library (`-buildmode=c-shared`) that exports
+- `examples/cgo/library/main.go` — a shared library (`-buildmode=c-shared`) that exports
   `Exported`, `Next`, `Checksum`, `Reference`, `Collect`.
-- `application/main.c` — a C application that calls the library from several threads.
+- `examples/cgo/application/main.c` — a C application that calls the library from several threads.
+- `examples/parser/main.go` — an expression calculator that reports errors with `Jump`.
+- `examples/samefringe/main.go` — two tree walkers resumed in turn (the "same fringe" problem).
 - `Makefile` — build, test and stress targets (see below).
 - `docs/logo.svg`, `docs/logo.png` — the logo (SVG source and its PNG rendering).
 
@@ -81,8 +91,9 @@ recursion, a generator that resumes finished frames, error handling — are in
 - `make run` — builds the library and the application and runs them (normally and
   under garbage collector pressure).
 - `make stress` — tests with `GOGC=1`, `gccheckmark=1`, `clobberfree=1`.
+- `make examples` — runs the Go programs from `examples` (`parser`, `samefringe`).
 - `make clean` — removes the `build` directory.
-- `make test-arm64` and `make run-arm64` — the same for arm64 via the
+- `make test-arm64`, `make run-arm64` and `make examples-arm64` — the same for arm64 via the
   `qemu-aarch64-static` emulator and the `aarch64-linux-gnu-gcc` cross compiler.
 
 ## How it works
@@ -146,8 +157,9 @@ shifted. This is done once per snapshot and only when the location has changed.
 ### Development
 - Requirements: Linux, Go 1.23+, `gcc`. For arm64: `qemu-aarch64-static` and
   `aarch64-linux-gnu-gcc`.
-- Before a commit: `make test`, `make stress`, `make run`, and on assembly changes also
-  `make test-arm64` and `make run-arm64`. Format with `gofmt` only.
+- Before a commit: `make test`, `make stress`, `make run`, `make examples`, and on assembly
+  changes also `make test-arm64`, `make run-arm64` and `make examples-arm64`. Format with
+  `gofmt` only.
 - A new Go release: run `GOTOOLCHAIN=go1.X make test stress run`. If `Set` reports a layout error,
   compare the package with the new runtime sources:
 
