@@ -1,5 +1,19 @@
 //go:build amd64 || arm64
 
+// Package setjmp implements setjmp and longjmp for Go on amd64 and arm64.
+//
+// [JMPBuf.Set] saves the stack frames from its call site up to the base frame: the first frame
+// called by the runtime (a goroutine function or main.main) or by a cgo export wrapper.
+// [JMPBuf.Jump] later restores these frames, and the saved Set call returns again, this time
+// with false. A jump may go up the stack, down into frames that have already returned, and
+// across goroutines and threads.
+//
+// After a jump, stack variables hold their values from the time of Set, while heap data is not
+// rolled back. Keep the state that must survive a jump on the heap, for example in a struct
+// that also contains the [JMPBuf]. Deferred calls of abandoned frames are not run, as in C.
+//
+// The package reads runtime internals. It supports Linux with Go 1.23 to 1.27, checks the
+// runtime layout on the first Set, and reports a mismatch through [JMPBuf.Err].
 package setjmp
 
 import (
@@ -13,6 +27,11 @@ import (
 	"unsafe"
 )
 
+// JMPBuf holds a stack saved by [JMPBuf.Set] and resumed by [JMPBuf.Jump].
+//
+// The zero value is an unset buffer ready to use. A JMPBuf is not safe for concurrent use and
+// must not be copied after Set. A set buffer keeps the goroutine that holds its frames alive
+// until [JMPBuf.Free] is called.
 type JMPBuf struct {
 	Debug  bool // NOTE: Runs a full garbage collection inside Set and Jump.
 	holder *stackHolder
@@ -514,15 +533,31 @@ func (holder *stackHolder) resolve() error {
 	return err
 }
 
+// Err reports why the last [JMPBuf.Set] failed. It returns nil if Set succeeded or the buffer
+// is unset. [JMPBuf.Free] resets it to nil.
 func (buf *JMPBuf) Err() error {
 	return buf.err
 }
 
+// Free releases the saved stack and the goroutine that holds it, and clears [JMPBuf.Err].
+// The Debug field is kept. Free is safe on an unset buffer and may be called more than once.
+// After Free, [JMPBuf.Jump] fails until the next [JMPBuf.Set].
 func (buf *JMPBuf) Free() {
 	shared.release(buf.holder)
 	buf.holder, buf.err = nil, nil
 }
 
+// Jump restores the frames saved by the last [JMPBuf.Set] of the buffer and makes that Set
+// call return false. On success Jump does not return. The frames between the base frame and
+// the caller of Jump are abandoned without running their deferred calls.
+//
+// Jump must run on a stack whose base frame is called from the same place as at Set time. So a
+// buffer set in one goroutine started by a go statement may be resumed in another one, and a
+// buffer set in an exported cgo function may be resumed in another call of the same function.
+// Jump cannot cross runtime frames such as [reflect.Value.Call] or panic handling.
+//
+// Jump returns an error if the buffer is unset or freed, if the last Set failed, or if the
+// base frame does not match.
 func (buf *JMPBuf) Jump() error {
 	if err := longjmp(buf); err != nil {
 		return fmt.Errorf("setjmp.Jump failed: %w", err)
@@ -530,6 +565,24 @@ func (buf *JMPBuf) Jump() error {
 	return nil
 }
 
+// Set saves the stack from the caller of Set up to the base frame and returns true. When
+// [JMPBuf.Jump] resumes the buffer, this Set call returns again, this time with false.
+// Setting the buffer again replaces the previous snapshot.
+//
+// Set also returns true on failure: then [JMPBuf.Err] reports the reason and the buffer becomes
+// unset. So check Err whenever Set returns true:
+//
+//	if buf.Set() {
+//		if err := buf.Err(); err != nil {
+//			return err
+//		}
+//		fmt.Println("buffer is set")
+//	} else {
+//		fmt.Println("resumed by Jump")
+//	}
+//
+// Set fails if a captured frame has a pending defer statement inside a loop, or if the runtime
+// layout differs from the one the package expects.
 func (buf *JMPBuf) Set() bool {
 	if err := supported(); err != nil {
 		buf.Free()
